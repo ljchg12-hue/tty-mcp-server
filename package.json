@@ -1,0 +1,23 @@
+{
+  "name": "tty-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for executing TTY/PTY commands",
+  "type": "module",
+  "main": "build/index.js",
+  "scripts": {
+    "build": "node node_modules/typescript/bin/tsc",
+    "start": "node build/index.js",
+    "dev": "npx tsc && node build/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "node-pty": "^1.0.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.17"
+  }
+}
