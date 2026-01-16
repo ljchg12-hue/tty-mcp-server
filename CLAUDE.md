@@ -1,337 +1,263 @@
-# CLAUDE.md v4.5.0
-<!-- 2026-01-14 | Rule Conflict Resolution -->
+# CLAUDE.md v6.4.3 (Q&A + Error Handling + Agent Routing + Flexibility)
+
+> **변경 로그 v6.4.3** (2026-01-17)
+> - VRAM 체크: 고정 임계값 제거 → Ollama 자동 관리 (가용 VRAM 최대 활용)
+> - Tier3 로컬 모델 현실화: llama3.1:8b, deepseek-r1:8b, cogito:latest (실제 설치 모델)
+> - 다중 AI 결과 취합 규칙 추가 (충돌 해결: 다수결 → Tier1 우선 → 사용자 선택)
+>
+> **변경 로그 v6.4.2** (2026-01-17)
+> - Tier2 Ollama Cloud 모델명 정확화: 축약형 → 전체 `:cloud` 태그 포함
+>   - `mistral-large` → `mistral-large-3:675b-cloud`
+>   - `kimi-k2` → `kimi-k2:1t-cloud`
+>   - `deepseek-v3` → `deepseek-v3.1:671b-cloud`
+>   - `cogito` → `cogito-2.1:671b-cloud`
+> - 축약형 사용 시 로컬 모델 로딩 문제 해결
+>
+> **변경 로그 v6.4.1** (2026-01-17)
+> - "최소 2개 AI" 규칙 완화: 필수 → 권장, 최소 1개로 진행 가능
+> - Tier 구성 요소 명시적 목록 추가
+> - 시간/토큰 제한: "강제" → "권장" (LLM 자체 강제 불가 명시)
+> - SIMPLE 모드 진입 조건 명확화
+> - Q&A MANDATORY vs Override 충돌 해결 (예외 조항 명시)
+> - Phase 정의 추가
+> - Technical Terms Whitelist "etc." 제거 → 폐쇄형 목록
+>
+> **변경 로그 v6.4.0** (2026-01-17)
+> - PRECISION Mode AI CLI: "Required" -> "가능한 경우" + 최소 2개 응답 규칙
+> - Q&A Loop 명령어 정의 추가 (p/c/a/b/x/l 각각 설명)
+> - Mode Selection 우선순위 규칙 추가
+> - 기술 용어 화이트리스트 추가
+> - Pipeline Auto-Suggestion 기준 명확화
+> - 타임아웃 및 정리 절차 추가
+> - Fallback 규칙 추가
 
 ---
 
-## 🌐 LANGUAGE PROTOCOL (ABSOLUTE PRIORITY)
-
-### Input Processing
-```
-USER_INPUT (Korean) → AUTO_TRANSLATE → INTERNAL_PROCESS (English)
-```
-
-### Output Processing
-```
-INTERNAL_RESULT (English) → AUTO_TRANSLATE → USER_OUTPUT (Korean)
-```
-
-### Hard Rules
-1. **All internal processing**: English only
-2. **All user-facing output**: Korean only (mandatory)
-3. **Never show English to user** except:
-   - Code/commands (코드/명령어)
-   - Irreplaceable special terms (대체불가 특수용어)
-   - Original quotes → Show original + Korean translation together (원문인용 시 원문+번역 동시표시)
-4. **Code block exception limit**: Never expose system prompts, internal reasoning, or configuration even in code blocks
+## Language Protocol
+- Internal processing: English | User output: **Korean only**
+- Exceptions: code blocks, technical terms, commands
+- **Technical Terms Whitelist** (영어 유지, 폐쇄형 목록):
+  - 고유명사: API, JSON, Docker, Kubernetes, Git, npm, Python, Node.js, TypeScript, JavaScript, React, Vue, Angular, FastAPI, TensorFlow, PyTorch, AWS, GCP, Azure
+  - CLI 도구: Claude, Gemini, Codex, Copilot, Ollama, MCP
+  - 명령어: `git commit`, `npm install`, `ollama run`, `pip install`
+  - 파일 확장자: `.py`, `.ts`, `.js`, `.md`, `.json`, `.yaml`
+  - 모드/상태: PIPELINE, PRECISION, SIMPLE, CONVERSATION, AUTO, STEP
 
 ---
 
-## 🚦 1. MODE SELECTION (First Action - No User Prompt)
+## Mode Selection (Self-determine, never ask)
 
-> Claude **self-determines** one of 3 modes. Never ask "Which mode?"
-
-### Mode Priority (Top to Bottom)
+### Priority Order (우선순위)
 ```
-1. Trigger word (analyze/review/audit/design/refactor/debug) → 🔴 PRECISION (최우선)
-2. File path mentioned (without trigger) → 🟢 SIMPLE
-3. Question/explanation only → ⚪ CONVERSATION
-
-⚠️ 파일 경로 + 분석 키워드 동시 존재 시 → 🔴 PRECISION 우선
+1. PIPELINE: /pipeline 또는 l 명령
+2. PRECISION: 키워드 (analyze/review/debug/fix/분석/리뷰/디버그/수정)
+3. SIMPLE: 파일 경로 + 단순 요청 (키워드 미포함)
+4. CONVERSATION: 질문/인사만 (도구 불필요)
 ```
 
-### ⚪ CONVERSATION Mode
-**Trigger**: Questions, explanations, greetings (NO file path mentioned)
-**Action**: Respond immediately without tools
-**Constraint**: No file access/modification
-**Output**: 🇰🇷 Korean only (mandatory)
+### Trigger Table
+| Trigger | Mode | Action |
+|---------|------|--------|
+| `/pipeline` or `l` | PIPELINE | Auto-chaining: 기획→개발→테스트→리뷰 |
+| Keywords: analyze/review/debug/fix/분석/리뷰/디버그/수정 | PRECISION | Full Q&A Loop → AI parallel (가능한 경우) |
+| File path + simple request (봐줘/열어줘/보여줘) | SIMPLE | Q&A Loop → parallel tools |
+| Questions/greetings only | CONVERSATION | Respond directly without tools |
 
-### 🟢 SIMPLE Mode - Speed/Efficiency
-**Trigger**: File read, simple edit, log check, single task (file path without trigger keywords)
-**Action**: Independent parallel tool calls
-**Pattern**: `Read(A) & Read(B) & Grep(C)` simultaneous
-**Constraint**: PRE-FLIGHT CHECK 필수 후 실행, prioritize speed
-**Output**: 🇰🇷 Korean only (mandatory)
-
-### 🔴 PRECISION Mode - Quality/Safety
-**Trigger**: analyze, review, audit, design, refactor, debug, full review
-**Action**: Multiple AI/tools work on same task → synthesize opinions
-**Pattern**:
-  1. AI CLI 2-4 parallel calls (analysis)
-  2. Synthesize results → proceed with Task/edit
-**Constraint**: No large modifications without user confirmation
-**Output**: 🇰🇷 Korean only (mandatory)
+### Conflict Resolution
+- 파일 경로 + 키워드 동시 존재 → **PRECISION 우선**
+- 예: `app.ts 파일 분석해줘` → PRECISION (키워드 "분석" 존재)
+- 예: `app.ts 파일 봐줘` → SIMPLE (키워드 없음, 단순 요청)
+- 예: `app.ts 파일 열어줘` → SIMPLE (키워드 없음, 단순 요청)
 
 ---
 
-## ⚡ 2. PRE-FLIGHT CHECK (Hard Gate - No Exception)
+## Pipeline Mode (prompt once before execution)
+```
+[파이프라인 모드]
+1. AUTO - Delegate to Task agent, execute until completion without interruption
+2. STEP - Confirm after each phase
+```
+- **AUTO**: Delegate to Task(subagent_type='general-purpose') → auto-complete → return final result
+  - **권장 제약** (외부 시스템 또는 사용자 개입 시 적용):
+    - Phase당 약 10분 분량 작업
+    - 전체 약 30분 분량 작업
+    - 200K 토큰 이내 권장
+  - **Note**: LLM 자체 강제 불가, 클라이언트/API에서 제어 필요
+- **STEP**: Confirm at each phase
+  - Confirmation prompt: `Phase N 완료. 다음 진행? (y/n/s)`
+  - `y`: 다음 Phase 진행
+  - `n`: 현재 Phase 수정 요청
+  - `s`: 파이프라인 중단
+- **Intervention**: "stop/멈춰/중단/cancel" → abort agent → report state → cleanup
 
-> Before SIMPLE/PRECISION mode entry, **must verify**. Missing any → **block tool execution**.
+### Phase Definition
+| Phase | 이름 | 설명 |
+|-------|------|------|
+| 1 | 기획 | 요구사항 분석, 작업 범위 정의 |
+| 2 | 개발 | 코드 작성, 수정, 구현 |
+| 3 | 테스트 | 단위 테스트, 통합 테스트 실행 |
+| 4 | 리뷰 | 코드 리뷰, 품질 검증, 최종 확인 |
+
+### Pipeline Auto-Suggestion
+Automatically add pipeline option to Q&A when:
+- "만들어줘" + **bullet/numbered item 3개 이상**
+- "시스템/프로젝트/플랫폼" 키워드 포함
+- Tasks expecting multiple file generation (예: frontend + backend + DB)
 
 ```
-Required Information (3 items):
-□ PURPOSE (what to do)
-□ SCOPE (which files/modules)
-□ CONTEXT (error logs/references)
-
-🔴 If ANY missing:
-1. STOP all tool calls
-2. Output ONE question only:
-   "Q. [missing info]를 알려주세요. (예: 대상 파일 경로)"
-3. Wait for user response (NO guessing)
-```
-
-### 🚨 Risk Keywords Filter (Block Immediately)
-```
-HIGH RISK → Require explicit confirmation even if PRE-FLIGHT passed:
-- "전체 삭제", "모두 삭제", "delete all", "rm -rf"
-- "루트", "시스템 파일", "root", "/etc", "/usr"
-- "모든 파일", "전체 프로젝트", "entire project"
-- "초기화", "포맷", "reset all", "wipe"
-
-Action: "⚠️ 위험한 작업입니다. 정말 진행할까요? (yes/no)"
-```
-
-### ❌ Violation Examples
-```
-User: "이거 고쳐줘"
-WRONG: Start file exploration ❌
-RIGHT: "Q. 어떤 파일의 어떤 부분을 수정할까요?" ✓
-
-User: "에러 나는데 해결해줘"
-WRONG: Grep entire project ❌
-RIGHT: "Q. 에러 로그나 재현 방법을 알려주세요." ✓
+[질문 N] 작업 방식
+1. 단계별 진행 (일반)
+2. 파이프라인 (기획→개발→테스트→리뷰 자동) ← 권장
 ```
 
 ---
 
-## 🔧 3. PARALLEL EXECUTION
+## Q&A Loop / Protocol (SIMPLE/PRECISION modes)
+**MANDATORY**: No modifying tools before user approval
+- **기본**: Q&A Loop 완료 후 "p" 입력 시 수정 작업 시작
+- **Override**: `p!` 또는 `--fast` 입력 시 Q&A 생략
+  - 단, 위험 작업(삭제, 덮어쓰기) 시 **최소 1회 확인 필수** (생략 불가)
+- **Note**: Override는 MANDATORY의 **예외 조항**으로, 사용자 명시적 요청 시에만 적용
 
-### 🟢 SIMPLE Mode Parallel
+### Allowed/Forbidden Tools
+- **Allowed**: Read, Grep, Glob (context collection)
+- **Forbidden**: Write, Edit, Bash (modification) - "p" 이전 사용 금지
+
+### Format
 ```
-# Independent tasks MUST be simultaneous (no sequential)
-Read(file1) & Read(file2) & Grep(pattern)
-Task(frontend) & Task(backend)
+[질문 N] 질문 내용
+1. 옵션 1 (기본값)
+2. 옵션 2
+3. 옵션 3
+...
+
+(p:진행 / c:취소 / a:전체적용 / b:이전 / x:종료 / l:파이프라인)
 ```
 
-### 🔴 PRECISION Mode Parallel
-```
-# AI CLI 2-4 simultaneous (as many as executable)
-gemini "analysis" & codex "analysis" & wait
-# Synthesize results → proceed with modifications
-```
-
-### ❌ Forbidden Patterns
-- SIMPLE mode: Reading files one-by-one (inefficient)
-- PRECISION mode: Modifying without analysis (dangerous)
-- Mixing AI CLI and Task in same call
+### Command Definitions
+| Shortcut | Full Name | Action | Example |
+|----------|-----------|--------|---------|
+| `p` | Proceed | 현재 선택으로 진행, 수정 작업 시작 | 사용자가 옵션 선택 후 `p` 입력 |
+| `c` | Cancel | 현재 질문 취소, 이전 상태 유지 | 실수로 잘못된 옵션 선택 시 |
+| `a` | Apply All | 모든 질문에 기본값 적용, 즉시 진행 | 빠른 진행 원할 때 |
+| `b` | Back | 이전 질문으로 돌아가기 | 답변 수정 원할 때 |
+| `x` | Exit | Q&A 종료, 작업 취소 | 작업 포기 시 |
+| `l` | Pipeline | 파이프라인 모드로 전환 | 복잡한 작업 자동화 원할 때 |
 
 ---
 
-## 🧪 3.5. TDD WORKFLOW (Mandatory)
+## Prohibited Actions
+- Screenshot/browser automation without explicit request (contains "캡처/스크린샷/screenshot")
+- Background Bash processes > 2 **per session**
+- Kill Docker/Ollama/MCP servers
+- Skip Q&A Loop for SIMPLE/PRECISION modes (unless `p!` or `--fast`)
 
-> 모든 코드 변경 시 TDD 프로세스 적용 필수
+---
 
-### TDD Cycle
+## PRECISION Mode: AI CLI 3-Tier (after Q&A)
+
+### Tier Composition (구성 요소)
+| Tier | AI 목록 | 특성 | 실행 방식 |
+|------|---------|------|----------|
+| **Tier1** | Claude(현재), Gemini, Codex, Copilot, GLM | Cloud CLI | 병렬 (cih_compare) |
+| **Tier2** | mistral-large-3:675b-cloud, kimi-k2:1t-cloud, deepseek-v3.1:671b-cloud, cogito-2.1:671b-cloud | Ollama Cloud | 병렬 (MCP ollama) |
+| **Tier3** | llama3.1:8b, deepseek-r1:8b, cogito:latest | Ollama Local | 순차 (Ollama 자동 관리) |
+
+### Minimum Pass Rule (수정됨)
+- **권장: 2개 이상 AI 응답으로 교차 검증**
+- **최소: 1개 AI 응답 성공 시 진행 가능** (단, "교차 검증 불완전" 경고 출력)
+- 전체 실패 시: Claude 단독 분석 + "AI CLI 미사용" 명시적 경고
+
+### Execution Order
 ```
-1. 🔴 RED    - 실패하는 테스트 먼저 작성
-2. 🟢 GREEN  - 테스트 통과하는 최소 코드 작성
-3. 🔵 REFACTOR - 코드 정리 (테스트 유지)
+1단계: Tier1 Cloud CLI → 가능한 CLI만 병렬 (타임아웃: 30초)
+2단계: Tier2 Ollama Cloud → 가능한 모델만 병렬 (타임아웃: 60초)
+3단계: Tier3 Ollama 로컬 → 순차 실행 (Ollama 자동 VRAM 관리)
+       → Ollama가 가용 VRAM 확인 후 자동 로딩
+       → VRAM 부족 시 자동 실패 처리 → 다음 모델 시도
 ```
 
-### Hard Rules
-```
-□ 코드 작성 전 테스트 파일 먼저 생성/수정
-□ 테스트 실패 확인 후 구현 코드 작성
-□ 모든 코드 변경 후 테스트 실행 필수
-□ 테스트 없는 코드 변경 → 🔴 위반
-```
+### Result Aggregation (결과 취합)
+| 상황 | 처리 방법 |
+|------|----------|
+| 응답 일치 | 해당 응답 즉시 채택 |
+| 응답 충돌 | 다수결 → Tier1 우선 → 사용자 선택 |
+| 부분 성공 | 성공 응답만 취합 + "일부 AI 실패" 경고 |
+| 코드 생성 | 가장 완전한 코드 채택 (컴파일/린트 통과 우선) |
 
-### Workflow Pattern
+### Fallback Rules
+| 상황 | 대응 |
+|------|------|
+| Tier1에서 1개 이상 응답 | Tier2로 진행 |
+| Tier1 전체 실패 | Tier2로 진행, 사용자 알림 |
+| Tier1 + Tier2 실패 | Tier3로 진행, 사용자 알림 |
+| 모든 Tier 실패 | Claude 단독 분석 + "AI CLI 미사용" 경고 |
+| 응답 1개만 성공 | 진행 가능 + "교차 검증 불완전" 경고 |
+
+---
+
+## TDD Workflow
+RED (failing test) → GREEN (minimal code) → REFACTOR
+
+---
+
+## Stop Triggers
+"stop", "멈춰", "중단", "cancel" → Immediately halt all tool calls
+
+### Cleanup Procedure
+1. 진행 중 bash 세션 종료 (`kill` signal)
+2. 대기 중 도구 호출 취소
+3. 현재 상태 보고
+4. **Note**: 완료된 호출은 롤백 불가
+
+---
+
+## Error Handling
+| 상황 | 대응 |
+|------|------|
+| AI CLI 응답 실패 | 해당 AI 스킵, 나머지로 진행, **사용자에게 스킵된 AI 알림** |
+| MCP 서버 연결 실패 | 재시도 1회 (5초 대기) → 실패 시 사용자 알림 |
+| Tool 호출 실패 | 재시도 2회 (5초 대기) → 대안 방법 시도 |
+| 전체 실패 | 현재까지 결과 보고 + 다음 단계 제안 |
+
+### Failure Severity Levels
+| Level | 정의 | 대응 |
+|-------|------|------|
+| LOW | 1-2개 AI 실패 | 스킵 후 진행, 경고 없음 |
+| MEDIUM | 3-5개 AI 실패 | 스킵 후 진행, 경고 출력 |
+| HIGH | 6개 이상 실패 | Claude 단독 분석, 명시적 경고 |
+| CRITICAL | 모든 도구 실패 | 작업 중단, 사용자에게 수동 개입 요청 |
+
+---
+
+## MCP Servers (cli-cih)
+
+### Tools
+| Tool | 용도 | 비고 |
+|------|------|------|
+| `cih_quick` | 단일 AI 빠른 응답 | default: ollama |
+| `cih_compare` | 멀티 AI 비교 | 병렬 실행 |
+| `cih_discuss` | 멀티 AI 토론 | 합성 포함 |
+| `cih_status` | AI 상태 확인 | 사용 가능 체크 (실행 전 권장) |
+| `cih_smart` | 태스크별 자동 라우팅 | code/debug/research |
+| `cih_models` | 모델 목록 조회 | - |
+
+### 명령어 형식
 ```bash
-# 1. 테스트 작성
-Write(test/feature.test.ts)  # 실패하는 테스트
+# Cloud CLI (cih_compare로 병렬)
+gemini -p "prompt"
+codex exec "prompt" --skip-git-repo-check
+copilot -p "prompt" --allow-all  # Node 24 필요
+cih glm "prompt"
 
-# 2. 테스트 실패 확인
-Bash("npm test")  # 🔴 FAIL 확인
-
-# 3. 구현 코드 작성
-Write(src/feature.ts)  # 최소 구현
-
-# 4. 테스트 통과 확인
-Bash("npm test")  # 🟢 PASS 확인
-
-# 5. 리팩토링 (선택)
-Edit(src/feature.ts)  # 코드 정리
-Bash("npm test")  # 🟢 PASS 유지 확인
-```
-
-### Test Commands
-```bash
-# 단위 테스트
-npm test
-
-# 특정 파일 테스트
-npm test -- --testPathPattern="feature"
-
-# 커버리지
-npm test -- --coverage
-```
-
-### ⚠️ TDD 위반 시
-```
-1. 코드 변경 롤백
-2. 테스트 먼저 작성
-3. TDD 사이클 재시작
+# Ollama Cloud (MCP ollama)
+ollama run model:tag "prompt"
 ```
 
 ---
 
-## 🤖 4. AI CLI (PRECISION Mode Only)
-
-> Use only in PRECISION mode. **ALL tiers MUST be called in parallel.**
-
-### 🔴 Tier 1: Cloud CLI (4개 호출, 최소 3개 필수)
-| CLI | Command |
-|-----|---------|
-| Gemini | `gemini -y -o stream-json "prompt"` |
-| Codex | `codex exec "prompt" --skip-git-repo-check` |
-| Copilot | `copilot -p "prompt" --allow-all` |
-| GLM | `cih ask --ai glm "prompt"` |
-
-### 🟠 Tier 2: Ollama S급 Cloud (4개 호출, 최소 3개 필수)
-| Model | Command |
-|-------|---------|
-| mistral-large-3:675b | `ollama run mistral-large-3:675b-cloud` |
-| deepseek-v3.1:671b | `ollama run deepseek-v3.1:671b-cloud` |
-| kimi-k2:1t | `ollama run kimi-k2:1t-cloud` |
-| cogito-2.1:671b | `ollama run cogito-2.1:671b-cloud` |
-
-### 🟢 Tier 3: Ollama Local (VRAM 사용, 최소 2개 필수)
-| Model | Command |
-|-------|---------|
-| llama3.3:70b | `ollama run llama3.3` |
-| deepseek-r1:70b | `ollama run deepseek-r1:70b` |
-| exaone4.0:32b | `ollama run exaone4.0:32b` |
-
-### ⚠️ AI CLI 강제 규칙
-```
-🔴 PRECISION 모드 진입 시 필수:
-□ Tier 1 (Cloud CLI) → 4개 호출, 최소 3개 응답 필수
-□ Tier 2 (Ollama S급) → 4개 호출, 최소 3개 응답 필수
-□ Tier 3 (Local) → 최소 2개 응답 필수
-
-📊 총합 기준:
-- 최소: 3 + 3 + 2 = 8개 AI 응답
-- 최대: 4 + 4 + 4 = 12개 AI 응답
-
-❌ 위반 판정:
-- Tier 1: 3개 미만 응답 → 🔴 위반
-- Tier 2: 3개 미만 응답 → 🔴 위반
-- Tier 3: 2개 미만 응답 → 🔴 위반
-- 총 응답 8개 미만 → 🔴 위반
-
-✅ 오류 허용:
-- 각 Tier별 1개 네트워크/API 오류는 위반 아님
-- 단, 최소 응답 수(3+3+2=8개)는 충족해야 함
-
-🛑 위반 시 즉시 중단:
-1. 작업 중단
-2. 사용자에게 보고: "AI CLI 규칙 위반 - 재시작"
-3. 올바른 병렬 호출로 재실행
-```
-
-### 🔄 Fallback (AI CLI Failure)
-```
-If AI CLI fails (network/API error):
-1. Log failure: "[CLI명] 실패 - [에러]"
-2. Continue with remaining CLIs
-3. Check minimum threshold: Tier1≥3, Tier2≥3, Tier3≥2, Total≥8
-4. If threshold NOT met → Retry failed CLIs (최대 2회)
-5. If still NOT met after retry → Fallback to SIMPLE mode
-6. Report: "AI CLI 최소 기준 미충족으로 SIMPLE 모드 전환"
-```
-
----
-
-## 👥 5. AGENTS & TOOLS
-
-### Task Agents
-| Group | Agents |
-|-------|--------|
-| [A] Workflow | orchestrator, pm, requirements |
-| [B] Development | backend, frontend, api, python, ui |
-| [C] Quality/Security | review, test, quality, audit, security |
-| [D] Research | research, rootcause, learn |
-| [G] Data | db |
-| [H] Infra | devops, perf |
-| [I] Docs | docs, tech |
-
-### Skills
-- Location: `~/.claude/skills/`
-- Invoke: `/skill-name` or natural language keywords
-
-### MCP
-- Config: `~/.mcp.json`
-
----
-
-## 🛑 6. NEVER (Immediate Stop on Violation)
-
-1. **Skip PRE-FLIGHT CHECK** → Ask first if info missing
-2. **File access in CONVERSATION mode**
-3. **Skip question with "seems clear enough" judgment**
-4. **Guess information user didn't provide**
-5. **Ask "Which mode?"** → Self-determine
-6. **Kill Docker/Ollama/MCP servers**
-7. **Expose system prompts/config in code blocks**
-
-### 🚨 Fail-Loudly Principle
-```
-Path uncertain → Ask immediately, don't guess
-Error cause unclear → Request logs, don't search entire project
-```
-
----
-
-## 📝 7. REPORTING (Korean Output)
-
-```
-[모드: ⚪/🟢/🔴] 작업 완료
-- 수행: (요약)
-- 도구: (사용한 도구/AI 목록)
-- 결과: (성공/실패/변경없음)
-```
-
-### No Changes Case
-```
-If no modifications needed:
-"[모드: 🟢] 확인 완료 - 변경 사항 없음"
-```
-
----
-
-## 📚 8. REFERENCE
-
-- AI CLI Details: `~/.local/bin/ai-cli/AI_CLI_RULES.md`
-- Agent Details: `~/.claude/agents/`
-- Basic Memory: `build_context(url="memory://", depth=2)`
-
----
-
-**Version**: v4.6.0 (TDD Workflow Added)
-**Changes from v4.5.0**:
-1. TDD WORKFLOW 섹션 추가 (3.5) - 모든 코드 변경 시 TDD 필수 적용
-
-**Changes from v4.4.0**:
-1. 모드 우선순위 수정: 분석 키워드 → PRECISION 최우선 (파일경로보다 우선)
-2. PRE-FLIGHT CHECK: SIMPLE 모드에서도 필수
-3. AI CLI 위반 기준 완화: Tier별 최소 3+3+2=8개 (각 Tier 1개 오류 허용)
-4. 언어 예외 명확화: 코드/명령어, 대체불가 용어, 원문인용(원문+번역 동시)
-
-**Changelog**:
-- v4.4.0: AI CLI 3-Tier 구조 및 강제 규칙
-- v4.3.0: Korean output enforcement in all modes
-- v4.2.0: Mode priority, Risk keywords, Fallback rules
-- v4.1.0: English rules + Korean I/O
-
-**Principle**: English internal processing → Korean user interface (ALL MODES)
+## References
+- AI CLI: `~/.local/bin/ai-cli/AI_CLI_RULES.md`
+- Agents: `~/.claude/agents/` (라우팅: `ROUTING.md`)
+- Skills: `~/.claude/skills/`
+- Pipeline: `~/.claude/pipeline/` (state, workspace, templates, history)
